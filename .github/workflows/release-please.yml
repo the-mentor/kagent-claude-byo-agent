@@ -17,3 +17,4 @@ jobs:
         with:
           release-type: node
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          auto-merge: true
