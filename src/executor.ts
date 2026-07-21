@@ -1,7 +1,7 @@
 import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentExecutor, RequestContext, ExecutionEventBus } from '@a2a-js/sdk/server';
-import type { TaskArtifactUpdateEvent, TaskStatusUpdateEvent, TextPart, Message } from '@a2a-js/sdk';
+import type { Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent, TextPart, Message } from '@a2a-js/sdk';
 import { v4 as uuidv4 } from 'uuid';
 
 const WORKSPACE = '/home/agent/workspace';
@@ -67,6 +67,15 @@ function makeArtifactEvent(
   };
 }
 
+function makeTaskEvent(taskId: string, contextId: string): Task {
+  return {
+    kind: 'task',
+    id: taskId,
+    contextId,
+    status: { state: 'working', timestamp: new Date().toISOString() },
+  };
+}
+
 export const claudeExecutor: AgentExecutor = {
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     const { taskId, contextId, userMessage } = requestContext;
@@ -101,10 +110,16 @@ export const claudeExecutor: AgentExecutor = {
         });
       }
       // Acknowledge the human turn; the original query() task continues on its own.
+      eventBus.publish(makeTaskEvent(taskId, contextId));
       eventBus.publish(makeStatusEvent(taskId, contextId, 'completed', true));
       eventBus.finished();
       return;
     }
+
+    // Publish a Task event first so ResultManager.currentTask is initialized before
+    // any status-update or artifact-update events arrive. Without this, message/send
+    // drops all updates ("unknown task") because the task is never in the store.
+    eventBus.publish(makeTaskEvent(taskId, contextId));
 
     const prompt = extractPrompt(userMessage);
     const abortController = new AbortController();
