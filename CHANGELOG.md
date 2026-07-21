@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/the-mentor/kagent-claude-byo-agent/compare/v1.0.0...v1.0.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* implement release-please v5 auto-merge via gh cli ([#9](https://github.com/the-mentor/kagent-claude-byo-agent/issues/9)) ([8f049ba](https://github.com/the-mentor/kagent-claude-byo-agent/commit/8f049ba127759742255af870bd6b21f6ac0beeb7))
+
 ## 1.0.0 (2026-07-21)
 
 
