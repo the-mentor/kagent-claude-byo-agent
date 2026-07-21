@@ -38,12 +38,14 @@ User / kagent UI
 ```
 claude-byo-agent/
 ├── src/
-│   ├── index.ts          — entrypoint, starts Express on PORT (default 8080)
-│   ├── server.ts         — Express app, mounts A2A handlers
-│   ├── agent-card.ts     — static AgentCard metadata
-│   ├── executor.ts       — AgentExecutor impl: query() + HITL permission handler
+│   ├── index.ts              — entrypoint, starts Express on PORT (default 8080)
+│   ├── server.ts             — Express app, mounts A2A handlers, selects task store
+│   ├── agent-card.ts         — static AgentCard metadata
+│   ├── executor.ts           — AgentExecutor impl: query() + HITL permission handler
+│   ├── kagent-task-store.ts  — TaskStore that persists tasks to the kagent controller
 │   └── __tests__/
 │       ├── executor.test.ts
+│       ├── kagent-task-store.test.ts
 │       └── server.test.ts
 ├── kagent-manifests/
 │   ├── agent.yaml        — SandboxAgent CRD manifest
@@ -83,6 +85,22 @@ The Dockerfile sets `ENV HOME=/data/home/agent`, but Substrate overrides `HOME` 
 
 Session IDs are also persisted to `/data/.claude-sessions.json` so that the executor can resume the correct Claude Code session across turns. Together, these two mechanisms give the same conversation continuity as a long-running regular agent.
 
+### Task persistence (kagent chat history)
+
+The kagent UI renders chat history from the controller's **tasks** table, which is populated only when the agent write-through persists its A2A tasks to `POST {KAGENT_URL}/api/tasks`. With the SDK's default `InMemoryTaskStore`, tasks live only in the agent pod's memory — every session renders empty once the live SSE stream closes.
+
+`src/kagent-task-store.ts` implements the `@a2a-js/sdk/server` `TaskStore` interface as a TypeScript twin of kagent's Go `KAgentTaskStore` (`go/adk/pkg/taskstore/store.go`):
+
+- `save(task)` → `POST {KAGENT_URL}/api/tasks` — the SDK's `ResultManager` calls this after every published event, upserting the task (keyed by task ID, associated to the session via `contextId`).
+- `load(taskId)` → `GET {KAGENT_URL}/api/tasks/{id}` — used by the framework to resume existing tasks (e.g. the HITL approval turn).
+- Auth mirrors kagent's Go `KAgentTokenService`: `Authorization: Bearer` with the projected service-account token from `/var/run/secrets/tokens/kagent-token` (re-read every 60s) plus an `X-Agent-Name` header (`KAGENT_NAME`).
+- Before saving, messages/artifacts whose metadata carries a partial flag (`kagent_adk_partial`, or legacy `adk_partial`/`kagent_partial`) are stripped from history, so persisted history contains only final messages.
+- Persistence failures are logged and swallowed — they must not kill the live stream.
+
+`server.ts` selects the store at startup: `KAgentTaskStore` when `KAGENT_URL` is set (kagent deployments inject it), `InMemoryTaskStore` otherwise (local `docker run`).
+
+To cooperate with partial-stripping, the executor stamps streaming `working` messages (text chunks and `Using tool: …` notices) with `kagent_adk_partial: true`. The `completed` event carries the full accumulated response text — it is the single non-partial agent message that survives in persisted history. The kagent UI shows partial working messages in its transient streaming box and renders the final message as the one persistent chat bubble.
+
 ### Module system
 
 The project compiles to CommonJS (`"module": "CommonJS"`) with `"moduleResolution": "node"`. `@a2a-js/sdk` ships actual JS files at its subpath exports (`/server`, `/server/express`), so `node` resolution works. `bundler` resolution requires ESM mode and does not apply here.
@@ -113,12 +131,14 @@ Events emitted during a task:
 
 | Event | `final` | Description |
 |-------|---------|-------------|
-| `artifact-update` | false | Claude produced text output |
-| `status-update` `working` | false | Claude is using a tool |
-| `status-update` `input-required` | false | Claude needs human approval for a tool |
-| `status-update` `completed` | true | Task finished successfully |
+| `task` | — | Initializes the task (only for new tasks, never on resume) |
+| `status-update` `working` | false | Streaming text chunk or tool notice; message metadata carries `kagent_adk_partial: true` so it is excluded from persisted history |
+| `status-update` `input-required` | true | Claude needs human approval for a tool; ends the current stream — the client resumes the task with the same `taskId` |
+| `status-update` `completed` | true | Task finished; message carries the full response text (the single persisted agent message) |
 | `status-update` `failed` | true | Task finished with an error |
 | `status-update` `canceled` | true | Task was aborted |
+
+`input-required` must be `final: true`: the SDK keys execution event buses by `taskId` and only detaches a stream's queue on a final event. Since the approval turn resumes the **same** `taskId`, a non-final `input-required` leaves the first stream attached to the shared bus — every post-approval event would then be delivered to both streams and the UI would render the response twice.
 
 ---
 
@@ -129,31 +149,42 @@ Instead of bypassing permission checks, the executor uses the SDK's `canUseTool`
 ### Flow
 
 ```
-1. User sends task via message/stream (contextId: "ctx-1")
+1. User sends task via message/stream (contextId: "ctx-1", taskId: "task-A")
    → execute() starts, query() runs with canUseTool callback
 
 2. Claude decides to use a tool (e.g. Bash: rm -rf /important)
    → SDK calls canUseTool("Bash", {cmd: "..."}, opts)
    → canUseTool emits:
-       status-update { state: "input-required", final: false,
-                       message: "Claude wants to run Bash: rm -rf ...\nReply yes to allow or no to deny." }
+       status-update { state: "input-required", final: true,
+                       message: adk_request_confirmation DataPart }
+   → the first SSE stream ends (final event); the task stays resumable
+     (input-required is not a terminal task state)
    → canUseTool parks — returns a Promise that has not resolved yet
    → query() is suspended
 
-3. kagent UI shows the pending request to the user
+3. kagent UI shows the approval card to the user
 
-4. User replies with a new message/stream (same contextId: "ctx-1")
-   → execute() is called again
-   → executor detects pending permission for contextId "ctx-1"
-   → parses user reply: "yes" → allow, anything else → deny
-   → resolves the parked Promise
-   → publishes status-update { state: "completed", final: true } for this turn
-   → returns
+4. User decides; the UI sends a new message/stream with the SAME taskId "task-A"
+   (a DataPart { decision_type: "approve" | "reject" }, or plain text)
+   → the request handler loads task-A from the task store, appends the
+     decision message to its history, and saves it
+   → execute() is called again; executor detects the pending permission
+     for contextId "ctx-1" and resolves the parked Promise (allow/deny)
+   → the approval execute() publishes NO events of its own — it deposits its
+     eventBus in pendingResponseBuses and awaits until the original execute()
+     finishes (publishing a bare Task event here would overwrite the task's
+     persisted history)
 
 5. Original query() resumes with the allow/deny result
+   → the original execute() picks up the approval turn's eventBus from
+     pendingResponseBuses and publishes all subsequent events there
+     (the first stream is closed; its bus has no listeners anymore)
    → if allowed: Claude executes the tool and continues
    → if denied: Claude receives a denial message and may respond or stop
-   → eventually query() completes → status-update { state: "completed", final: true }
+   → eventually query() completes
+     → status-update { state: "completed", final: true, message: <response> }
+     → the original execute()'s finally block calls finished() on the approval
+       bus and resolves the approval execute()'s await
 ```
 
 ### Ask-once-per-tool semantics
@@ -200,7 +231,21 @@ const pendingPermissions = new Map<string, {
 
 The `execute()` method checks this map first on every call. If the `contextId` has an entry, the incoming message is treated as a human permission answer rather than a new task.
 
-Cleanup: the `finally` block in `execute()` always removes the pending entry, preventing stale state if `query()` errors or is aborted before the human responds.
+A second map hands the approval turn's event bus to the original `execute()`:
+
+```typescript
+// Keyed by contextId — the approval handler deposits its eventBus here so the
+// original execute() can route the post-approval response to the waiting client
+// stream. The approval handler awaits resolve(), which the original execute()
+// calls from its finally block after finishing the bus.
+const pendingResponseBuses = new Map<string, {
+  bus: ExecutionEventBus;
+  taskId: string;
+  resolve: () => void;
+}>();
+```
+
+Cleanup: the `finally` block in `execute()` always removes the pending entries (including an orphaned response bus if `query()` threw before consuming it), preventing stale state if `query()` errors or is aborted before the human responds.
 
 ---
 
@@ -303,8 +348,9 @@ npm test
 
 Tests cover:
 
-- `executor.test.ts` — 10 tests: artifact events, tool status, success/failure/abort/cancel, HITL allow/deny flows
-- `server.test.ts` — 2 tests: agent card endpoint, unknown JSON-RPC method error
+- `executor.test.ts` — streaming/partial working events, tool status, success/failure/abort/cancel, HITL allow/deny flows (text and native DataPart decisions), and post-approval bus routing
+- `kagent-task-store.test.ts` — task save/load against the controller API: auth headers, partial-message stripping, 404 handling, and resilience to an unreachable controller
+- `server.test.ts` — agent card endpoint, unknown JSON-RPC method error
 
 ---
 
@@ -327,18 +373,24 @@ Implements `AgentExecutor` with two methods:
 
 **`execute(requestContext, eventBus)`**
 
-1. Checks `pendingPermissions` for the `contextId` — if found, this is a HITL response; resolve it and return
-2. Extracts the prompt from the user message
-3. Defines `canUseTool` callback that emits `input-required` and parks on a `Promise`
-4. Runs `query({ prompt, options: { cwd, abortController, canUseTool } })`
+1. Checks `pendingPermissions` for the `contextId` — if found, this is a HITL decision: resolve the parked permission, deposit this turn's eventBus in `pendingResponseBuses`, and await until the original `execute()` finishes
+2. Publishes a Task event (only when the message does not resume an existing task), extracts the prompt from the user message
+3. Defines `canUseTool` callback that emits `input-required` (`final: true`) and parks on a `Promise`
+4. Runs `query({ prompt, options: { cwd, abortController, canUseTool, allowedTools, resume } })`
 5. Translates SDK messages to A2A events:
-   - `assistant` → `artifact-update` (text) or `working` status (tool_use)
-   - `result` → `completed` or `failed` status
+   - `assistant` text / tool_use → `working` status with `kagent_adk_partial: true` message metadata
+   - `result` success → `completed` status carrying the full accumulated response text
+   - `result` error → `failed` status
+   - After HITL approval, switches the active event bus to the approval turn's bus
 6. Catches `AbortError` → `canceled` status; other errors → `failed` status
 
 **`cancelTask(taskId, eventBus)`**
 
 Aborts the `AbortController` registered for the task, which signals the `query()` generator to stop and also resolves any pending `canUseTool` with deny.
+
+### `src/kagent-task-store.ts`
+
+`KAgentTaskStore` — write-through `TaskStore` backed by the kagent controller REST API. See [Task persistence](#task-persistence-kagent-chat-history) for the full behavior. Used automatically when `KAGENT_URL` is set; otherwise `server.ts` falls back to `InMemoryTaskStore`.
 
 ### `src/index.ts`
 
