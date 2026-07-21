@@ -211,6 +211,14 @@ describe('claudeExecutor', () => {
       );
       expect(inputRequired).toBeDefined();
       expect(inputRequired.final).toBe(false);
+      // Native kagent HITL: message has adk_request_confirmation DataPart
+      const parts = inputRequired.status.message?.parts ?? [];
+      const dataPart = parts.find((p: any) => p.kind === 'data');
+      expect(dataPart).toBeDefined();
+      expect((dataPart as any).data.name).toBe('adk_request_confirmation');
+      expect((dataPart as any).data.args.originalFunctionCall.name).toBe('Bash');
+      expect((dataPart as any).metadata.type).toBe('function_call');
+      expect((dataPart as any).metadata.is_long_running).toBe(true);
 
       // Resolve by sending "no" so execute() can finish
       const { bus: bus2 } = makeEventBus();
@@ -248,6 +256,79 @@ describe('claudeExecutor', () => {
         (e) => e.kind === 'status-update' && e.status.state === 'completed',
       );
       expect(completed2?.final).toBe(true);
+    });
+
+    it('resolves allow on native DataPart decision_type approve', async () => {
+      const { bus } = makeEventBus();
+      const { bus: bus2, published: published2 } = makeEventBus();
+      const contextId = uuidv4();
+      let capturedResult: any = null;
+
+      mockedSdk.query.mockImplementation(({ options }: any) => {
+        async function* run() {
+          if (options?.canUseTool) {
+            capturedResult = await options.canUseTool('Write', { file_path: '/tmp/x' }, {
+              signal: new AbortController().signal,
+              toolUseID: 'tuid-native-approve',
+            });
+          }
+          yield { type: 'result', subtype: 'success', is_error: false, result: '' };
+        }
+        return run();
+      });
+
+      const execPromise = claudeExecutor.execute(makeContext('task', contextId), bus);
+      await new Promise((r) => setImmediate(r));
+
+      // Send native DataPart decision
+      const approveMessage: Message = {
+        kind: 'message',
+        messageId: uuidv4(),
+        role: 'user',
+        parts: [{ kind: 'data', data: { decision_type: 'approve' } } as any],
+      };
+      await claudeExecutor.execute({ ...makeContext('', contextId), userMessage: approveMessage } as any, bus2);
+      await execPromise;
+
+      expect(capturedResult?.behavior).toBe('allow');
+      const completed2 = published2.find(
+        (e) => e.kind === 'status-update' && e.status.state === 'completed',
+      );
+      expect(completed2?.final).toBe(true);
+    });
+
+    it('resolves deny on native DataPart decision_type reject', async () => {
+      const { bus } = makeEventBus();
+      const { bus: bus2 } = makeEventBus();
+      const contextId = uuidv4();
+      let capturedResult: any = null;
+
+      mockedSdk.query.mockImplementation(({ options }: any) => {
+        async function* run() {
+          if (options?.canUseTool) {
+            capturedResult = await options.canUseTool('Bash', {}, {
+              signal: new AbortController().signal,
+              toolUseID: 'tuid-native-reject',
+            });
+          }
+          yield { type: 'result', subtype: 'success', is_error: false, result: '' };
+        }
+        return run();
+      });
+
+      const execPromise = claudeExecutor.execute(makeContext('task', contextId), bus);
+      await new Promise((r) => setImmediate(r));
+
+      const rejectMessage: Message = {
+        kind: 'message',
+        messageId: uuidv4(),
+        role: 'user',
+        parts: [{ kind: 'data', data: { decision_type: 'reject' } } as any],
+      };
+      await claudeExecutor.execute({ ...makeContext('', contextId), userMessage: rejectMessage } as any, bus2);
+      await execPromise;
+
+      expect(capturedResult?.behavior).toBe('deny');
     });
 
     it('resolves deny when user replies no', async () => {
