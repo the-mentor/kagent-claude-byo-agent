@@ -61,14 +61,20 @@ describe('claudeExecutor', () => {
     );
     expect(streaming).toBeDefined();
     expect(streaming.status.message.parts[0].text).toBe('Hello world');
+    // Streaming chunks are flagged partial so the kagent task store strips them
+    // from persisted history.
+    expect(streaming.status.message.metadata?.kagent_adk_partial).toBe(true);
 
     const completed = published.find(
       (e) => e.kind === 'status-update' && e.status.state === 'completed',
     );
-    expect(completed.status.message.parts[0].text).toBe('Hello world');
+    expect(completed).toBeDefined();
+    expect(completed.status.message?.parts[0].text).toBe('Hello world');
+    // The completed message is the single non-partial copy that persists.
+    expect(completed.status.message?.metadata?.kagent_adk_partial).toBeUndefined();
   });
 
-  it('accumulates multiple text blocks into completed message', async () => {
+  it('accumulates multiple text blocks as working events', async () => {
     const { bus, published } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'assistant', message: { content: [
@@ -90,7 +96,8 @@ describe('claudeExecutor', () => {
     const completed = published.find(
       (e) => e.kind === 'status-update' && e.status.state === 'completed',
     );
-    expect(completed.status.message.parts[0].text).toBe('Hello world');
+    expect(completed).toBeDefined();
+    expect(completed.status.message?.parts[0].text).toBe('Hello world');
   });
 
   it('publishes working status-update for tool_use block', async () => {
@@ -181,7 +188,7 @@ describe('claudeExecutor', () => {
   });
 
   describe('HITL — canUseTool', () => {
-    it('emits input-required (non-final) when canUseTool is called', async () => {
+    it('emits input-required (final) when canUseTool is called', async () => {
       const { bus, published } = makeEventBus();
       const contextId = uuidv4();
 
@@ -210,7 +217,9 @@ describe('claudeExecutor', () => {
         (e) => e.kind === 'status-update' && e.status.state === 'input-required',
       );
       expect(inputRequired).toBeDefined();
-      expect(inputRequired.final).toBe(false);
+      // input-required ends the stream (final) — the client resumes the task
+      // by sending the decision with the same taskId on a new stream.
+      expect(inputRequired.final).toBe(true);
       // Native kagent HITL: message has adk_request_confirmation DataPart
       const parts = inputRequired.status.message?.parts ?? [];
       const dataPart = parts.find((p: any) => p.kind === 'data');
@@ -329,6 +338,55 @@ describe('claudeExecutor', () => {
       await execPromise;
 
       expect(capturedResult?.behavior).toBe('deny');
+    });
+
+    it('routes post-approval response to the approval bus, not the original bus', async () => {
+      const { bus: bus1, published: published1 } = makeEventBus();
+      const { bus: bus2, published: published2 } = makeEventBus();
+      const contextId = uuidv4();
+
+      // query() blocks on canUseTool, then after approval yields assistant text + result
+      mockedSdk.query.mockImplementation(({ options }: any) => {
+        async function* run() {
+          if (options?.canUseTool) {
+            await options.canUseTool('Bash', { command: 'curl -s https://api.ipify.org' }, {
+              signal: new AbortController().signal,
+              toolUseID: 'tuid-hitl',
+            });
+          }
+          yield { type: 'assistant', message: { content: [{ type: 'text', text: '1.2.3.4' }] } };
+          yield { type: 'result', subtype: 'success', is_error: false, result: '' };
+        }
+        return run();
+      });
+
+      // First execute: blocks at canUseTool, emits input-required on bus1
+      const execPromise = claudeExecutor.execute(makeContext('what is my ip?', contextId), bus1);
+      await new Promise((r) => setImmediate(r));
+
+      // Approval arrives on bus2 — deposits bus2 for the original execute() to pick up
+      await claudeExecutor.execute(makeContext('yes', contextId), bus2);
+      await execPromise;
+
+      // Post-approval text must NOT appear on bus1
+      const textOnBus1 = published1.filter(
+        (e) => e.kind === 'status-update' && e.status?.message?.parts?.[0]?.text === '1.2.3.4',
+      );
+      expect(textOnBus1).toHaveLength(0);
+
+      // Post-approval text appears exactly once on bus2 as a working event
+      const workingOnBus2 = published2.filter(
+        (e) => e.kind === 'status-update' && e.status.state === 'working' && e.status.message,
+      );
+      expect(workingOnBus2).toHaveLength(1);
+      expect(workingOnBus2[0].status.message.parts[0].text).toBe('1.2.3.4');
+
+      const completedOnBus2 = published2.find(
+        (e) => e.kind === 'status-update' && e.status.state === 'completed',
+      );
+      expect(completedOnBus2).toBeDefined();
+      expect(completedOnBus2.final).toBe(true);
+      expect(completedOnBus2.status.message?.parts[0].text).toBe('1.2.3.4');
     });
 
     it('resolves deny when user replies no', async () => {

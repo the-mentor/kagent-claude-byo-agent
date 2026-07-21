@@ -55,6 +55,13 @@ const pendingPermissions = new Map<string, {
   toolInput: Record<string, unknown>;
 }>();
 
+// Keyed by contextId — the approval handler deposits its eventBus here so the
+// original execute() can pick it up and route the post-approval response there.
+// The approval handler AWAITS resolve() which the original execute() calls from its
+// finally block — this keeps bus2's HTTP SSE stream open until the original execute()
+// finishes publishing and calls bus2.finished(), then resolves so the handler can return.
+const pendingResponseBuses = new Map<string, { bus: ExecutionEventBus; taskId: string; resolve: () => void }>();
+
 function extractPrompt(message: Message): string {
   return message.parts
     .filter((p): p is TextPart => p.kind === 'text')
@@ -111,7 +118,13 @@ function makeInputRequiredEvent(
     kind: 'status-update',
     taskId,
     contextId,
-    final: false,
+    // final:true ends the current SSE stream (matching the ADK reference executor).
+    // input-required is a turn-ending interrupt, not a terminal task state — the
+    // client resumes the task by sending the decision with the same taskId. Leaving
+    // this false keeps the first stream's queue attached to the shared per-taskId
+    // event bus, so post-approval events get delivered to BOTH streams and the UI
+    // renders the response twice.
+    final: true,
     status: { state: 'input-required', message: msg },
   };
 }
@@ -122,6 +135,10 @@ function makeStatusEvent(
   state: 'working' | 'completed' | 'failed' | 'canceled' | 'input-required',
   final: boolean,
   messageText?: string,
+  // Marks the message as a partial streaming chunk (kagent_adk_partial), so the
+  // KAgentTaskStore strips it from persisted history — only the final completed
+  // message survives, preventing duplicate bubbles when history is re-rendered.
+  partial = false,
 ): TaskStatusUpdateEvent {
   const msg: Message | undefined = messageText
     ? {
@@ -129,6 +146,7 @@ function makeStatusEvent(
         messageId: uuidv4(),
         role: 'agent',
         parts: [{ kind: 'text', text: messageText } as TextPart],
+        ...(partial ? { metadata: { kagent_adk_partial: true } } : {}),
       }
     : undefined;
   return {
@@ -182,17 +200,29 @@ export const claudeExecutor: AgentExecutor = {
           toolUseID: pending.toolUseID,
         });
       }
-      // Acknowledge the human turn; the original query() task continues on its own.
-      eventBus.publish(makeTaskEvent(taskId, contextId));
-      eventBus.publish(makeStatusEvent(taskId, contextId, 'completed', true));
-      eventBus.finished();
+      // Hand this stream's eventBus to the original execute() and AWAIT a signal.
+      // Keeping this execute() alive holds bus2's HTTP SSE stream open so the
+      // original execute() can still publish to it. The original execute() calls
+      // bus2.finished() then resolve() from its finally block; we return after that.
+      //
+      // No Task event here: the client resumes with the original taskId, so the
+      // request handler already loaded the persisted task, appended the approval
+      // message to its history, and saved it. Publishing a bare Task would
+      // overwrite that history in the store.
+      await new Promise<void>((resolve) => {
+        pendingResponseBuses.set(contextId, { bus: eventBus, taskId, resolve });
+      });
       return;
     }
 
     // Publish a Task event first so ResultManager.currentTask is initialized before
     // any status-update or artifact-update events arrive. Without this, message/send
     // drops all updates ("unknown task") because the task is never in the store.
-    eventBus.publish(makeTaskEvent(taskId, contextId));
+    // Skip when the message resumes an existing task — the store already holds it
+    // (with history), and a bare Task event would overwrite that history.
+    if (!requestContext.task) {
+      eventBus.publish(makeTaskEvent(taskId, contextId));
+    }
 
     logger.debug({ taskId, contextId }, 'task start');
     const prompt = extractPrompt(userMessage);
@@ -201,6 +231,13 @@ export const claudeExecutor: AgentExecutor = {
     const existingSession = getSession(contextId);
     logger.debug({ contextId, existingSession: existingSession ?? null }, 'session lookup');
     let responseText = '';
+    // After HITL approval the approval handler deposits its eventBus in pendingResponseBuses.
+    // We switch to it so the post-approval response reaches the waiting client stream.
+    let activeEventBus = eventBus;
+    let activeTaskId = taskId;
+    // Saved resolve() from the approval handler's pending promise — called in finally
+    // to unblock the approval execute() after activeEventBus.finished() closes bus2.
+    let approvalResolve: (() => void) | undefined;
 
     // canUseTool pauses query() and emits input-required so the human can decide.
     const canUseTool: CanUseTool = (toolName, input, opts) => {
@@ -243,6 +280,15 @@ export const claudeExecutor: AgentExecutor = {
         },
       })) {
         logger.debug({ type: msg.type, subtype: 'subtype' in msg ? msg.subtype : undefined }, 'sdk msg');
+        // After approval, switch to the response bus deposited by the approval handler.
+        const pendingResponse = pendingResponseBuses.get(contextId);
+        if (pendingResponse) {
+          pendingResponseBuses.delete(contextId);
+          activeEventBus = pendingResponse.bus;
+          activeTaskId = pendingResponse.taskId;
+          approvalResolve = pendingResponse.resolve;
+          logger.debug({ contextId, activeTaskId }, 'switched to approval response bus');
+        }
         if (msg.type === 'system' && msg.subtype === 'init') {
           logger.debug({ contextId, sessionId: msg.session_id }, 'session init');
           saveSession(contextId, msg.session_id);
@@ -250,36 +296,48 @@ export const claudeExecutor: AgentExecutor = {
           for (const block of msg.message.content) {
             if (block.type === 'text') {
               responseText += block.text;
-              eventBus.publish(
-                makeStatusEvent(taskId, contextId, 'working', false, block.text),
+              activeEventBus.publish(
+                makeStatusEvent(activeTaskId, contextId, 'working', false, block.text, true),
               );
             } else if (block.type === 'tool_use') {
-              eventBus.publish(
-                makeStatusEvent(taskId, contextId, 'working', false, `Using tool: ${block.name}`),
+              activeEventBus.publish(
+                makeStatusEvent(activeTaskId, contextId, 'working', false, `Using tool: ${block.name}`, true),
               );
             }
           }
         } else if (msg.type === 'result') {
           if (msg.subtype === 'success' && !msg.is_error) {
-            eventBus.publish(
-              makeStatusEvent(taskId, contextId, 'completed', true, responseText || undefined),
+            activeEventBus.publish(
+              makeStatusEvent(activeTaskId, contextId, 'completed', true, responseText || undefined),
             );
           } else {
             const errText = 'errors' in msg ? (msg.errors as string[]).join('; ') : msg.subtype;
-            eventBus.publish(makeStatusEvent(taskId, contextId, 'failed', true, errText));
+            activeEventBus.publish(makeStatusEvent(activeTaskId, contextId, 'failed', true, errText));
           }
         }
       }
     } catch (err: unknown) {
       if (err instanceof AbortError) {
-        eventBus.publish(makeStatusEvent(taskId, contextId, 'canceled', true));
+        activeEventBus.publish(makeStatusEvent(activeTaskId, contextId, 'canceled', true));
       } else {
-        eventBus.publish(makeStatusEvent(taskId, contextId, 'failed', true, String(err)));
+        activeEventBus.publish(makeStatusEvent(activeTaskId, contextId, 'failed', true, String(err)));
       }
     } finally {
       pendingPermissions.delete(contextId);
+      const orphanedPending = pendingResponseBuses.get(contextId);
+      pendingResponseBuses.delete(contextId);
       abortControllers.delete(taskId);
-      eventBus.finished();
+      activeEventBus.finished();
+      if (orphanedPending) {
+        // Approval bus was deposited but never consumed by the loop (e.g. query()
+        // threw before the next iteration). Close it then unblock the approval execute().
+        orphanedPending.bus.finished();
+        orphanedPending.resolve();
+      } else {
+        // Normal HITL path: bus was consumed and switched; unblock the approval execute()
+        // now that activeEventBus (bus2) has been finished() above.
+        approvalResolve?.();
+      }
     }
   },
 
