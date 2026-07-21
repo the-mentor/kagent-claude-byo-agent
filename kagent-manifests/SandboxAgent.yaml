@@ -1,18 +1,16 @@
 apiVersion: kagent.dev/v1alpha2
-kind: Agent
+kind: SandboxAgent
 metadata:
-  name: claude-coding-no-sandbox-agent
+  name: claude-coding-sandbox-agent
   namespace: kagent
 spec:
-  description: Claude Code Agent - No Sandbox
+  description: "Claude Code Agent — persistent workspace per Substrate actor"
   type: BYO
   byo:
     deployment:
-      image: ghcr.io/the-mentor/kagent-claude-byo-agent:latest
-      imagePullPolicy: Always
+      image: <registry>/claude-byo-agent:latest
+      cmd: /docker-entrypoint.sh
       env:
-        - name: PORT
-          value: "8080" # Regular Agents require A2A on port 8080 not port 80 so we override it via environment variable.
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
