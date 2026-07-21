@@ -1,0 +1,17 @@
+apiVersion: kagent.dev/v1alpha2
+kind: SandboxAgent
+metadata:
+  name: claude-coding-agent
+  namespace: kagent
+spec:
+  description: "Claude Code agent — persistent workspace per Substrate actor"
+  type: BYO
+  byo:
+    deployment:
+      image: <registry>/claude-byo-agent:latest
+      env:
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: anthropic-credentials
+              key: ANTHROPIC_API_KEY
