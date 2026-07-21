@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/the-mentor/kagent-claude-byo-agent/compare/v1.0.1...v1.0.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* add --repo flag to gh pr merge to avoid git context requirement ([#11](https://github.com/the-mentor/kagent-claude-byo-agent/issues/11)) ([a5022a2](https://github.com/the-mentor/kagent-claude-byo-agent/commit/a5022a24612c1d4332dee58b694f335371cb67bf))
+
 ## [1.0.1](https://github.com/the-mentor/kagent-claude-byo-agent/compare/v1.0.0...v1.0.1) (2026-07-21)
 
 
