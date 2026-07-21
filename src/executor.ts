@@ -49,7 +49,7 @@ function makeInputRequiredEvent(
 ): TaskStatusUpdateEvent {
   const confirmationPart: DataPart = {
     kind: 'data',
-    metadata: { type: 'function_call', is_long_running: true },
+    metadata: { adk_type: 'function_call', adk_is_long_running: true },
     data: {
       name: 'adk_request_confirmation',
       id: uuidv4(),

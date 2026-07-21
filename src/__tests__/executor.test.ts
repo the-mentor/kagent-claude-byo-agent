@@ -217,8 +217,8 @@ describe('claudeExecutor', () => {
       expect(dataPart).toBeDefined();
       expect((dataPart as any).data.name).toBe('adk_request_confirmation');
       expect((dataPart as any).data.args.originalFunctionCall.name).toBe('Bash');
-      expect((dataPart as any).metadata.type).toBe('function_call');
-      expect((dataPart as any).metadata.is_long_running).toBe(true);
+      expect((dataPart as any).metadata.adk_type).toBe('function_call');
+      expect((dataPart as any).metadata.adk_is_long_running).toBe(true);
 
       // Resolve by sending "no" so execute() can finish
       const { bus: bus2 } = makeEventBus();
