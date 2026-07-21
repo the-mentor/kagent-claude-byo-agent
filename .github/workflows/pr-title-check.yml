@@ -11,6 +11,19 @@ jobs:
   validate-title:
     runs-on: ubuntu-latest
     steps:
-      - uses: amannn/action-semantic-pull-request@800da4c97f618e44f972ff9bc21ab5daecc97773 # v6.1.1
+      - name: Check Conventional Commits format
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Conventional Commits: type(scope)!: description
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?(!)?: .+'
+          if ! echo "$PR_TITLE" | grep -qE "$pattern"; then
+            echo "PR title does not follow Conventional Commits format."
+            echo "Expected: type(optional-scope): description"
+            echo "Examples: feat: add login page"
+            echo "          fix(auth): handle expired tokens"
+            echo "          feat!: redesign API (breaking change)"
+            echo "Got: $PR_TITLE"
+            exit 1
+          fi
+          echo "PR title is valid: $PR_TITLE"
