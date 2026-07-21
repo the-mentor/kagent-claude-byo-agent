@@ -47,7 +47,7 @@ describe('claudeExecutor', () => {
     jest.clearAllMocks();
   });
 
-  it('publishes artifact-update for assistant text block', async () => {
+  it('publishes working status-update for assistant text block', async () => {
     const { bus, published } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'assistant', message: { content: [{ type: 'text', text: 'Hello world' }] } },
@@ -56,9 +56,41 @@ describe('claudeExecutor', () => {
 
     await claudeExecutor.execute(makeContext('do something'), bus);
 
-    const artifact = published.find((e) => e.kind === 'artifact-update');
-    expect(artifact).toBeDefined();
-    expect(artifact.artifact.parts[0].text).toBe('Hello world');
+    const streaming = published.find(
+      (e) => e.kind === 'status-update' && e.status.state === 'working' && e.status.message,
+    );
+    expect(streaming).toBeDefined();
+    expect(streaming.status.message.parts[0].text).toBe('Hello world');
+
+    const completed = published.find(
+      (e) => e.kind === 'status-update' && e.status.state === 'completed',
+    );
+    expect(completed.status.message.parts[0].text).toBe('Hello world');
+  });
+
+  it('accumulates multiple text blocks into completed message', async () => {
+    const { bus, published } = makeEventBus();
+    mockedSdk.query.mockReturnValue(gen(
+      { type: 'assistant', message: { content: [
+        { type: 'text', text: 'Hello ' },
+        { type: 'text', text: 'world' },
+      ] } },
+      { type: 'result', subtype: 'success', is_error: false, result: '' },
+    ));
+
+    await claudeExecutor.execute(makeContext('do something'), bus);
+
+    const workingEvents = published.filter(
+      (e) => e.kind === 'status-update' && e.status.state === 'working' && e.status.message,
+    );
+    expect(workingEvents).toHaveLength(2);
+    expect(workingEvents[0].status.message.parts[0].text).toBe('Hello ');
+    expect(workingEvents[1].status.message.parts[0].text).toBe('world');
+
+    const completed = published.find(
+      (e) => e.kind === 'status-update' && e.status.state === 'completed',
+    );
+    expect(completed.status.message.parts[0].text).toBe('Hello world');
   });
 
   it('publishes working status-update for tool_use block', async () => {

@@ -1,7 +1,7 @@
 import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentExecutor, RequestContext, ExecutionEventBus } from '@a2a-js/sdk/server';
-import type { Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent, TextPart, Message } from '@a2a-js/sdk';
+import type { Task, TaskStatusUpdateEvent, TextPart, Message } from '@a2a-js/sdk';
 import { v4 as uuidv4 } from 'uuid';
 
 const WORKSPACE = '/home/agent/workspace';
@@ -51,21 +51,6 @@ function makeStatusEvent(
   };
 }
 
-function makeArtifactEvent(
-  taskId: string,
-  contextId: string,
-  text: string,
-): TaskArtifactUpdateEvent {
-  return {
-    kind: 'artifact-update',
-    taskId,
-    contextId,
-    artifact: {
-      artifactId: uuidv4(),
-      parts: [{ kind: 'text', text } as TextPart],
-    },
-  };
-}
 
 function makeTaskEvent(taskId: string, contextId: string): Task {
   return {
@@ -124,6 +109,7 @@ export const claudeExecutor: AgentExecutor = {
     const prompt = extractPrompt(userMessage);
     const abortController = new AbortController();
     abortControllers.set(taskId, abortController);
+    let responseText = '';
 
     // canUseTool pauses query() and emits input-required so the human can decide.
     const canUseTool: CanUseTool = (toolName, input, opts) => {
@@ -173,7 +159,10 @@ export const claudeExecutor: AgentExecutor = {
         if (msg.type === 'assistant') {
           for (const block of msg.message.content) {
             if (block.type === 'text') {
-              eventBus.publish(makeArtifactEvent(taskId, contextId, block.text));
+              responseText += block.text;
+              eventBus.publish(
+                makeStatusEvent(taskId, contextId, 'working', false, block.text),
+              );
             } else if (block.type === 'tool_use') {
               eventBus.publish(
                 makeStatusEvent(taskId, contextId, 'working', false, `Using tool: ${block.name}`),
@@ -182,7 +171,9 @@ export const claudeExecutor: AgentExecutor = {
           }
         } else if (msg.type === 'result') {
           if (msg.subtype === 'success' && !msg.is_error) {
-            eventBus.publish(makeStatusEvent(taskId, contextId, 'completed', true));
+            eventBus.publish(
+              makeStatusEvent(taskId, contextId, 'completed', true, responseText || undefined),
+            );
           } else {
             const errText = 'errors' in msg ? (msg.errors as string[]).join('; ') : msg.subtype;
             eventBus.publish(makeStatusEvent(taskId, contextId, 'failed', true, errText));
