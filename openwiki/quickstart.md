@@ -42,8 +42,8 @@ Running requires `ANTHROPIC_API_KEY` in the environment. See [operations/deploym
 | `src/__tests__/` | Jest tests for the executor and server |
 | `Dockerfile` | Builds on kagent's `acp-sandbox-claude` base; installs, builds, tests, prunes |
 | `docker-entrypoint.sh` | `exec node /app/dist/index.js` (overrides the base image's ACP shim) |
-| `k8s/agent.yaml` | `SandboxAgent` CRD manifest |
-| `k8s/secret.yaml` | Template Secret for `ANTHROPIC_API_KEY` |
+| `kagent-manifests/agent.yaml` | `SandboxAgent` CRD manifest |
+| `kagent-manifests/secret.yaml` | Template Secret for `ANTHROPIC_API_KEY` |
 | `docs/design.md` | Authoritative long-form design doc |
 | `superpowers/` | Planning artifacts (plan + design spec) from the initial build; not runtime code |
 

@@ -36,7 +36,7 @@ Notable points:
 
 ## Kubernetes: SandboxAgent CRD
 
-Deploy as `kind: SandboxAgent` (`kagent.dev/v1alpha2`) in the `kagent` namespace (`k8s/agent.yaml`):
+Deploy as `kind: SandboxAgent` (`kagent.dev/v1alpha2`) in the `kagent` namespace (`kagent-manifests/agent.yaml`):
 
 ```yaml
 apiVersion: kagent.dev/v1alpha2
@@ -64,7 +64,7 @@ spec:
 
 ## Secret
 
-`ANTHROPIC_API_KEY` is provided via a Kubernetes Secret. `k8s/secret.yaml` is a placeholder-only template (`<replace-with-real-key>`); do not commit real keys. Create it directly instead:
+`ANTHROPIC_API_KEY` is provided via a Kubernetes Secret. `kagent-manifests/secret.yaml` is a placeholder-only template (`<replace-with-real-key>`); do not commit real keys. Create it directly instead:
 
 ```bash
 kubectl create secret generic anthropic-credentials \

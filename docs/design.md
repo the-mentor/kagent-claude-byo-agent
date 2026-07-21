@@ -45,7 +45,7 @@ claude-byo-agent/
 │   └── __tests__/
 │       ├── executor.test.ts
 │       └── server.test.ts
-├── k8s/
+├── kagent-manifests/
 │   ├── agent.yaml        — SandboxAgent CRD manifest
 │   └── secret.yaml       — Secret template for ANTHROPIC_API_KEY
 ├── Dockerfile

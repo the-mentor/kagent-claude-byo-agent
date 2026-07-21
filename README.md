@@ -29,11 +29,11 @@ docker run -e ANTHROPIC_API_KEY=<key> -p 8080:80 kagent-claude-byo-agent
 
 ## Kubernetes
 
-Apply the manifests in `k8s/` after filling in your API key in `k8s/secret.yaml`:
+Apply the manifests in `kagent-manifests/` after filling in your API key in `kagent-manifests/secret.yaml`:
 
 ```bash
-kubectl apply -f k8s/secret.yaml
-kubectl apply -f k8s/agent.yaml
+kubectl apply -f kagent-manifests/secret.yaml
+kubectl apply -f kagent-manifests/agent.yaml
 ```
 
 ## Repository map
@@ -46,7 +46,7 @@ kubectl apply -f k8s/agent.yaml
 | `src/executor.ts` | `AgentExecutor`: runs `query()`, maps SDK output to A2A events, implements HITL |
 | `Dockerfile` | Builds on kagent's `acp-sandbox-claude` base; installs, builds, tests, prunes |
 | `docker-entrypoint.sh` | `exec node /app/dist/index.js` |
-| `k8s/` | `SandboxAgent` CRD manifest and API key Secret template |
+| `kagent-manifests/` | `SandboxAgent` CRD manifest and API key Secret template |
 | `docs/design.md` | Authoritative design document |
 
 ## Documentation
