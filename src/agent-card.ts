@@ -1,6 +1,7 @@
 import type { AgentCard } from '@a2a-js/sdk';
 
 export const agentCard: AgentCard = {
+  protocolVersion: '0.3.0',
   name: 'claude-coding-agent',
   description: 'Claude Code agent powered by @anthropic-ai/claude-agent-sdk. Runs coding tasks in a persistent workspace.',
   url: 'http://localhost:8080',

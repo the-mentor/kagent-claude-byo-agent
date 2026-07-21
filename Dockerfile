@@ -4,12 +4,12 @@ USER root
 WORKDIR /app
 
 # Copy package files first for layer caching
-COPY package.json package-lock.json ./
+COPY package.json ./
 COPY tsconfig.json ./
 COPY src/ src/
 
 # Install all deps (including devDeps needed for tsc + jest), build, test, then prune
-RUN npm ci && npm run build && npm test && npm prune --production
+RUN npm install && npm run build && npm test && npm prune --production
 
 # Create the persistent workspace directory owned by the agent user
 RUN mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace

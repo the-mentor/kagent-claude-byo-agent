@@ -1,4 +1,13 @@
 import request from 'supertest';
+
+// Mock the executor to avoid loading the Claude SDK's ESM-only entry point in Jest's CJS mode.
+jest.mock('../executor', () => ({
+  claudeExecutor: {
+    execute: jest.fn(),
+    cancelTask: jest.fn(),
+  },
+}));
+
 import { app } from '../server';
 import { agentCard } from '../agent-card';
 

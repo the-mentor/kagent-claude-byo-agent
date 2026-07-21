@@ -20,7 +20,7 @@ const requestHandler = new DefaultRequestHandler(
 export const app = express();
 app.use(express.json());
 
-app.get(
+app.use(
   '/.well-known/agent-card.json',
   agentCardHandler({ agentCardProvider: async () => agentCard }),
 );
