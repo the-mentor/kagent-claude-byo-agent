@@ -10,7 +10,7 @@ tags: [quickstart, overview, kagent, a2a, claude]
 
 `claude-byo-agent` is a standalone **BYO (Bring Your Own) agent** for [kagent](https://github.com/kagent-dev/kagent). It wraps the `@anthropic-ai/claude-agent-sdk` in a thin **A2A** (Agent-to-Agent) HTTP/JSON-RPC server so that Claude Code can be deployed and managed as a kagent `SandboxAgent` CRD. It does not modify the kagent repository — it ships as its own container image.
 
-- **What it is:** an A2A server (`express` + `@a2a-js/sdk`) whose executor runs Claude Code via `query()` in a persistent workspace at `/home/agent/workspace`.
+- **What it is:** an A2A server (`express` + `@a2a-js/sdk`) whose executor runs Claude Code via `query()` in a persistent workspace at `/data/workspace`.
 - **Where it runs:** as a `SandboxAgent` in the `kagent` namespace; kagent (Substrate actor model) provisions one isolated container per actor.
 - **How it talks:** A2A JSON-RPC over HTTP with SSE streaming, listening on **port 80**.
 

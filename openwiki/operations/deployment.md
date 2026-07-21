@@ -21,7 +21,7 @@ COPY package.json ./
 COPY tsconfig.json ./
 COPY src/ src/
 RUN npm install && npm run build && npm test && npm prune --omit=dev
-RUN mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
+RUN mkdir -p /data && chown agent:agent /data
 USER agent
 EXPOSE 80
 ENTRYPOINT ["/docker-entrypoint.sh"]
@@ -60,7 +60,7 @@ spec:
 ```
 
 - `cmd` points at `/docker-entrypoint.sh` explicitly. An optional `ANTHROPIC_BASE_URL` env var is commented in the manifest for non-default Anthropic endpoints.
-- Each Substrate actor gets its own container and its own persistent `/home/agent/workspace`.
+- Each Substrate actor gets its own container and its own persistent `/data/workspace` (under the Substrate durable dir, so files survive actor auto-suspend cycles).
 
 ## Secret
 

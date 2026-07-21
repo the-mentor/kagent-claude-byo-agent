@@ -14,9 +14,13 @@ COPY src/ src/
 # Install all deps (including devDeps needed for tsc + jest), build, test, then prune
 RUN npm install && npm run build && npm test && npm prune --omit=dev
 
-RUN mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
+RUN mkdir -p /data && chown -R agent:agent /data
 
 USER agent
+
+# Default HOME for non-Substrate contexts (local docker run, non-sandbox deployments).
+# Substrate actors override this at launch time — see docker-entrypoint.sh.
+ENV HOME=/data/home/agent
 
 EXPOSE 80
 

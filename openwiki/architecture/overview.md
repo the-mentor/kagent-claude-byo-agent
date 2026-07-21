@@ -23,7 +23,7 @@ DefaultRequestHandler + InMemoryTaskStore + DefaultExecutionEventBusManager
 ClaudeExecutor (src/executor.ts)  — execute() / cancelTask()
       ▼
 @anthropic-ai/claude-agent-sdk  query()  →  async generator
-      Persistent workspace: /home/agent/workspace
+      Persistent workspace: /data/workspace
 ```
 
 ## Components
@@ -63,7 +63,8 @@ Event mapping produced by `execute()` (see `makeStatusEvent` / `makeArtifactEven
 
 ## Key design decisions
 
-- **`SandboxAgent`, not `Agent`.** `SandboxAgent` lets kagent provision and manage a container per Substrate actor, giving per-user workspace isolation and lifecycle for free. The workspace `/home/agent/workspace` is fixed and persistent for the actor's lifetime — isolation is at the container level, so no per-task temp dirs are needed.
+- **`SandboxAgent`, not `Agent`.** `SandboxAgent` lets kagent provision and manage a container per Substrate actor, giving per-user workspace isolation and lifecycle for free. The workspace `/data/workspace` is fixed and persistent for the actor's lifetime — isolation is at the container level, so no per-task temp dirs are needed. Placing it under `/data` (the Substrate durable dir) ensures workspace files survive DATA-scope auto-suspend cycles.
+- **`HOME=/data/home/agent` (set in entrypoint, not Dockerfile).** Claude Code's session store (`~/.claude/`) and config (`~/.claude.json`) must live under the Substrate durable dir so conversation history survives cold-boot resume. Substrate overrides the Dockerfile `ENV HOME` at actor launch time (actor runs as root → `HOME=/root`), so `docker-entrypoint.sh` explicitly re-sets `export HOME=/data/home/agent` before `exec node`, ensuring the node process and the `claude` subprocess both inherit it.
 - **A2A, not ACP.** The base image `acp-sandbox-claude` ships an ACP shim; this project overrides the entrypoint (`docker-entrypoint.sh`) to bypass it and run its own A2A server, since A2A is kagent's native agent protocol. Details in [deployment](../operations/deployment.md).
 - **Port 80.** The server listens on `:80` because kagent's `readyz` check probes port 80, not 8080 (commit `94909d3`; diagram updated in `de61b11`). `PORT` can still override it.
 - **CommonJS module system.** `tsconfig.json` compiles to CommonJS with `moduleResolution: "node"`. `@a2a-js/sdk` ships real JS at its subpath exports (`/server`, `/server/express`), so `node` resolution works; `bundler`/ESM resolution does not apply.
