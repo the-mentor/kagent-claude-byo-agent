@@ -1,6 +1,6 @@
 {
   "name": "claude-byo-agent",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Claude Code BYO A2A agent for kagent SandboxAgent",
   "private": true,
   "scripts": {
