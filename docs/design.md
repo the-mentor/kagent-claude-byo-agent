@@ -27,7 +27,7 @@ User / kagent UI
 │  @anthropic-ai/claude-agent-sdk     │
 │  query()  →  async generator        │
 │  Persistent workspace:              │
-│  /home/agent/workspace              │
+│  /data/workspace                    │
 └─────────────────────────────────────┘
 ```
 
@@ -65,7 +65,7 @@ kagent has two agent kinds:
 - `Agent` — a plain BYO agent with a fixed URL, no lifecycle management
 - `SandboxAgent` — kagent provisions and manages the container (Substrate actor model); each actor gets its own isolated container instance
 
-`SandboxAgent` is used here because it provides per-user workspace isolation and lifecycle management without any extra work. The workspace at `/home/agent/workspace` is persistent for the lifetime of the actor.
+`SandboxAgent` is used here because it provides per-user workspace isolation and lifecycle management without any extra work. The workspace at `/data/workspace` is persistent for the lifetime of the actor.
 
 ### A2A, not ACP
 
@@ -73,7 +73,15 @@ The base image (`acp-sandbox-claude`) ships an ACP shim. This project **override
 
 ### Workspace
 
-The workspace is a fixed path `/home/agent/workspace`, not a per-task temp directory. Since each `SandboxAgent` actor is its own container, isolation is provided at the container level. Claude Code reads and writes files there across tasks, giving it a persistent context for iterative development work.
+The workspace is a fixed path `/data/workspace`, not a per-task temp directory. Since each `SandboxAgent` actor is its own container, isolation is provided at the container level. Claude Code reads and writes files there across tasks, giving it a persistent context for iterative development work. Placing the workspace under `/data` (the Substrate durable dir) ensures files survive DATA-scope auto-suspend cycles.
+
+### Session persistence
+
+Claude Code's session store (`~/.claude/`) and config (`~/.claude.json`) must live under the Substrate durable dir (`/data`) to survive cold-boot resume.
+
+The Dockerfile sets `ENV HOME=/data/home/agent`, but Substrate overrides `HOME` at actor launch time based on the container user's passwd entry (the actor runs as root, so Substrate sets `HOME=/root`). To work around this, `docker-entrypoint.sh` explicitly re-sets `HOME=/data/home/agent` and runs `mkdir -p "$HOME"` before `exec node` — ensuring the node process and all subprocesses (including the `claude` subprocess spawned by `query()`) inherit the correct HOME.
+
+Session IDs are also persisted to `/data/.claude-sessions.json` so that the executor can resume the correct Claude Code session across turns. Together, these two mechanisms give the same conversation continuity as a long-running regular agent.
 
 ### Module system
 
@@ -211,7 +219,7 @@ COPY tsconfig.json ./
 COPY src/ src/
 
 RUN npm install && npm run build && npm test && npm prune --production
-RUN mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
+RUN mkdir -p /data && chown agent:agent /data
 
 USER agent
 EXPOSE 8080

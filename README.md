@@ -2,7 +2,7 @@
 
 A standalone **BYO (Bring Your Own) agent** for [kagent](https://github.com/kagent-dev/kagent). It wraps the `@anthropic-ai/claude-agent-sdk` in a thin **A2A** (Agent-to-Agent) HTTP/JSON-RPC server so that Claude Code can be deployed and managed as a kagent `SandboxAgent` CRD.
 
-- **What it is:** an A2A server (`express` + `@a2a-js/sdk`) whose executor runs Claude Code via `query()` in a persistent workspace at `/home/agent/workspace`
+- **What it is:** an A2A server (`express` + `@a2a-js/sdk`) whose executor runs Claude Code via `query()` in a persistent workspace at `/data/workspace`
 - **Where it runs:** as a `SandboxAgent` in the `kagent` namespace; kagent provisions one isolated container per actor
 - **How it talks:** A2A JSON-RPC over HTTP with SSE streaming on **port 80**
 

@@ -3,11 +3,49 @@ import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sd
 import type { AgentExecutor, RequestContext, ExecutionEventBus } from '@a2a-js/sdk/server';
 import type { Task, TaskStatusUpdateEvent, TextPart, DataPart, Message } from '@a2a-js/sdk';
 import { v4 as uuidv4 } from 'uuid';
+import * as fs from 'fs';
 import { logger } from './logger';
 
-const WORKSPACE = '/home/agent/workspace';
+const WORKSPACE = '/data/workspace';
+
+try {
+  fs.mkdirSync(WORKSPACE, { recursive: true });
+} catch { /* /data not mounted or not writable — workspace dir created lazily if needed */ }
+
+logger.info({ home: process.env.HOME, cwd: process.cwd() }, 'executor init');
+try {
+  const homeContents = fs.readdirSync(process.env.HOME ?? '/');
+  logger.debug({ homeContents }, 'home dir contents');
+} catch (err) {
+  logger.debug({ err }, 'home dir unreadable');
+}
 
 const abortControllers = new Map<string, AbortController>();
+
+const SESSIONS_FILE = '/data/.claude-sessions.json';
+
+function getSession(contextId: string): string | undefined {
+  try {
+    const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
+    const map = JSON.parse(raw) as Record<string, string>;
+    return map[contextId];
+  } catch {
+    return undefined;
+  }
+}
+
+function saveSession(contextId: string, sessionId: string): void {
+  try {
+    let map: Record<string, string> = {};
+    try {
+      map = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8')) as Record<string, string>;
+    } catch { /* file missing or corrupt — start fresh */ }
+    map[contextId] = sessionId;
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(map), 'utf-8');
+  } catch (err) {
+    logger.warn({ contextId, err }, 'failed to persist session');
+  }
+}
 
 // Keyed by contextId — stores the resolve fn for a paused canUseTool prompt.
 const pendingPermissions = new Map<string, {
@@ -160,6 +198,8 @@ export const claudeExecutor: AgentExecutor = {
     const prompt = extractPrompt(userMessage);
     const abortController = new AbortController();
     abortControllers.set(taskId, abortController);
+    const existingSession = getSession(contextId);
+    logger.debug({ contextId, existingSession: existingSession ?? null }, 'session lookup');
     let responseText = '';
 
     // canUseTool pauses query() and emits input-required so the human can decide.
@@ -199,10 +239,14 @@ export const claudeExecutor: AgentExecutor = {
             // Write, Edit, Bash intentionally omitted — subprocess sends can_use_tool
             // for these, triggering canUseTool HITL callback.
           ],
+          ...(existingSession ? { resume: existingSession } : {}),
         },
       })) {
         logger.debug({ type: msg.type, subtype: 'subtype' in msg ? msg.subtype : undefined }, 'sdk msg');
-        if (msg.type === 'assistant') {
+        if (msg.type === 'system' && msg.subtype === 'init') {
+          logger.debug({ contextId, sessionId: msg.session_id }, 'session init');
+          saveSession(contextId, msg.session_id);
+        } else if (msg.type === 'assistant') {
           for (const block of msg.message.content) {
             if (block.type === 'text') {
               responseText += block.text;
