@@ -14,11 +14,11 @@ User / kagent UI
       │  A2A (JSON-RPC over HTTP/SSE)
       ▼
 ┌─────────────────────────────────────┐
-│  Express server  :8080              │
+│  Express server  :80.               │
 │  ├── GET  /.well-known/agent-card   │
 │  └── POST /  (JSON-RPC)             │
 │       ├── message/send              │
-│       └── message/stream  ◄── SSE  │
+│       └── message/stream  ◄── SSE   │
 ├─────────────────────────────────────┤
 │  ClaudeExecutor (AgentExecutor)     │
 │  ├── execute()  — runs query()      │
