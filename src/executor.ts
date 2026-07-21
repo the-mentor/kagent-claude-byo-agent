@@ -3,6 +3,7 @@ import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sd
 import type { AgentExecutor, RequestContext, ExecutionEventBus } from '@a2a-js/sdk/server';
 import type { Task, TaskStatusUpdateEvent, TextPart, DataPart, Message } from '@a2a-js/sdk';
 import { v4 as uuidv4 } from 'uuid';
+import { logger } from './logger';
 
 const WORKSPACE = '/home/agent/workspace';
 
@@ -155,6 +156,7 @@ export const claudeExecutor: AgentExecutor = {
     // drops all updates ("unknown task") because the task is never in the store.
     eventBus.publish(makeTaskEvent(taskId, contextId));
 
+    logger.debug({ taskId, contextId }, 'task start');
     const prompt = extractPrompt(userMessage);
     const abortController = new AbortController();
     abortControllers.set(taskId, abortController);
@@ -199,6 +201,7 @@ export const claudeExecutor: AgentExecutor = {
           ],
         },
       })) {
+        logger.debug({ type: msg.type, subtype: 'subtype' in msg ? msg.subtype : undefined }, 'sdk msg');
         if (msg.type === 'assistant') {
           for (const block of msg.message.content) {
             if (block.type === 'text') {
