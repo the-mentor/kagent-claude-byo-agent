@@ -12,7 +12,7 @@ COPY tsconfig.json ./
 COPY src/ src/
 
 # Install all deps (including devDeps needed for tsc + jest), build, test, then prune
-RUN npm install && npm run build && npm test && npm prune --production
+RUN npm install && npm run build && npm test && npm prune --omit=dev
 
 RUN mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
 
