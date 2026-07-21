@@ -14,7 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
         with:
           release-type: node
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          auto-merge: true
+
+      - name: Enable auto-merge on Release PR
+        if: ${{ steps.release.outputs.pr }}
+        run: gh pr merge --auto --squash "${{ fromJson(steps.release.outputs.pr).number }}"
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
