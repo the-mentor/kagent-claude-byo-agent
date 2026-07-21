@@ -1,17 +1,20 @@
 import { query, AbortError } from '@anthropic-ai/claude-agent-sdk';
+import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentExecutor, RequestContext, ExecutionEventBus } from '@a2a-js/sdk/server';
-import type {
-  TaskStatusUpdateEvent,
-  TaskArtifactUpdateEvent,
-  TextPart,
-  Message,
-} from '@a2a-js/sdk';
+import type { TaskArtifactUpdateEvent, TaskStatusUpdateEvent, TextPart, Message } from '@a2a-js/sdk';
 import { v4 as uuidv4 } from 'uuid';
 
 const WORKSPACE = '/home/agent/workspace';
 
-// One AbortController per running task — keyed by taskId.
 const abortControllers = new Map<string, AbortController>();
+
+// Keyed by contextId — stores the resolve fn for a paused canUseTool prompt.
+const pendingPermissions = new Map<string, {
+  resolve: (r: PermissionResult) => void;
+  toolUseID: string;
+  toolName: string;
+  toolInput: Record<string, unknown>;
+}>();
 
 function extractPrompt(message: Message): string {
   return message.parts
@@ -20,10 +23,14 @@ function extractPrompt(message: Message): string {
     .join('\n');
 }
 
+function parseDecision(text: string): 'allow' | 'deny' {
+  return /^(yes|y|ok|sure|proceed|allow|approve|go\s+ahead)/i.test(text.trim()) ? 'allow' : 'deny';
+}
+
 function makeStatusEvent(
   taskId: string,
   contextId: string,
-  state: 'working' | 'completed' | 'failed' | 'canceled',
+  state: 'working' | 'completed' | 'failed' | 'canceled' | 'input-required',
   final: boolean,
   messageText?: string,
 ): TaskStatusUpdateEvent {
@@ -63,12 +70,91 @@ function makeArtifactEvent(
 export const claudeExecutor: AgentExecutor = {
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     const { taskId, contextId, userMessage } = requestContext;
+
+    // If this contextId has a pending permission prompt, the incoming message
+    // is the human's allow/deny answer rather than a new task.
+    const pending = pendingPermissions.get(contextId);
+    if (pending) {
+      pendingPermissions.delete(contextId);
+      const userText = extractPrompt(userMessage);
+      if (parseDecision(userText) === 'allow') {
+        pending.resolve({
+          behavior: 'allow',
+          toolUseID: pending.toolUseID,
+          // updatedInput is required by the subprocess's Zod schema when behavior is 'allow'.
+          // Pass the original tool input unchanged — we're approving as-is.
+          updatedInput: pending.toolInput,
+          // Add a session-level rule so the subprocess auto-approves this tool type
+          // for the rest of the conversation (ask-once-per-tool-type semantics).
+          updatedPermissions: [{
+            type: 'addRules',
+            rules: [{ toolName: `${pending.toolName}(*)` }],
+            behavior: 'allow',
+            destination: 'session',
+          }],
+        });
+      } else {
+        pending.resolve({
+          behavior: 'deny',
+          message: `User denied: ${userText.trim()}`,
+          toolUseID: pending.toolUseID,
+        });
+      }
+      // Acknowledge the human turn; the original query() task continues on its own.
+      eventBus.publish(makeStatusEvent(taskId, contextId, 'completed', true));
+      eventBus.finished();
+      return;
+    }
+
     const prompt = extractPrompt(userMessage);
     const abortController = new AbortController();
     abortControllers.set(taskId, abortController);
 
+    // canUseTool pauses query() and emits input-required so the human can decide.
+    const canUseTool: CanUseTool = (toolName, input, opts) => {
+      const promptText = opts.title ?? `Claude wants to use **${toolName}**`;
+      eventBus.publish(
+        makeStatusEvent(
+          taskId,
+          contextId,
+          'input-required',
+          false,
+          `${promptText}\n\nReply **yes** to allow or **no** to deny.`,
+        ),
+      );
+      return new Promise<PermissionResult>((resolve) => {
+        pendingPermissions.set(contextId, {
+          resolve,
+          toolUseID: opts.toolUseID,
+          toolName,
+          toolInput: (input ?? {}) as Record<string, unknown>,
+        });
+        // Use our own abortController (not opts.signal which the SDK may pre-abort).
+        abortController.signal.addEventListener(
+          'abort',
+          () => {
+            pendingPermissions.delete(contextId);
+            resolve({ behavior: 'deny', message: 'Task aborted', toolUseID: opts.toolUseID });
+          },
+          { once: true },
+        );
+      });
+    };
+
     try {
-      for await (const msg of query({ prompt, options: { cwd: WORKSPACE, abortController } })) {
+      for await (const msg of query({
+        prompt,
+        options: {
+          cwd: WORKSPACE,
+          abortController,
+          canUseTool,
+          allowedTools: [
+            'Read', 'Glob', 'Grep', 'LS',
+            // Write, Edit, Bash intentionally omitted — subprocess sends can_use_tool
+            // for these, triggering canUseTool HITL callback.
+          ],
+        },
+      })) {
         if (msg.type === 'assistant') {
           for (const block of msg.message.content) {
             if (block.type === 'text') {
@@ -95,6 +181,7 @@ export const claudeExecutor: AgentExecutor = {
         eventBus.publish(makeStatusEvent(taskId, contextId, 'failed', true, String(err)));
       }
     } finally {
+      pendingPermissions.delete(contextId);
       abortControllers.delete(taskId);
       eventBus.finished();
     }

@@ -9,9 +9,15 @@ spec:
   byo:
     deployment:
       image: <registry>/claude-byo-agent:latest
+      cmd: ["node", "dist/index.js"]
       env:
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
               name: anthropic-credentials
               key: ANTHROPIC_API_KEY
+        # - name: ANTHROPIC_BASE_URL
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: anthropic-credentials
+        #       key: ANTHROPIC_BASE_URL

@@ -21,7 +21,7 @@ async function* gen<T>(...items: T[]): AsyncGenerator<T, void> {
   for (const item of items) yield item;
 }
 
-function makeContext(text: string) {
+function makeContext(text: string, contextId = uuidv4()) {
   const userMessage: Message = {
     kind: 'message',
     messageId: uuidv4(),
@@ -30,29 +30,31 @@ function makeContext(text: string) {
   };
   return {
     taskId: uuidv4(),
-    contextId: uuidv4(),
+    contextId,
     userMessage,
   } as any;
 }
 
-describe('claudeExecutor', () => {
-  let eventBus: DefaultExecutionEventBus;
+function makeEventBus() {
   const published: any[] = [];
+  const bus = new DefaultExecutionEventBus();
+  bus.on('event', (e) => published.push(e));
+  return { bus, published };
+}
 
+describe('claudeExecutor', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    published.length = 0;
-    eventBus = new DefaultExecutionEventBus();
-    eventBus.on('event', (e) => published.push(e));
   });
 
   it('publishes artifact-update for assistant text block', async () => {
+    const { bus, published } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'assistant', message: { content: [{ type: 'text', text: 'Hello world' }] } },
       { type: 'result', subtype: 'success', is_error: false, result: 'Hello world' },
     ));
 
-    await claudeExecutor.execute(makeContext('do something'), eventBus);
+    await claudeExecutor.execute(makeContext('do something'), bus);
 
     const artifact = published.find((e) => e.kind === 'artifact-update');
     expect(artifact).toBeDefined();
@@ -60,12 +62,13 @@ describe('claudeExecutor', () => {
   });
 
   it('publishes working status-update for tool_use block', async () => {
+    const { bus, published } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', id: 'x', input: {} }] } },
       { type: 'result', subtype: 'success', is_error: false, result: '' },
     ));
 
-    await claudeExecutor.execute(makeContext('run a command'), eventBus);
+    await claudeExecutor.execute(makeContext('run a command'), bus);
 
     const working = published.find(
       (e) => e.kind === 'status-update' && e.status.state === 'working',
@@ -75,11 +78,12 @@ describe('claudeExecutor', () => {
   });
 
   it('publishes completed status-update with final=true on success', async () => {
+    const { bus, published } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'result', subtype: 'success', is_error: false, result: '' },
     ));
 
-    await claudeExecutor.execute(makeContext('task'), eventBus);
+    await claudeExecutor.execute(makeContext('task'), bus);
 
     const completed = published.find(
       (e) => e.kind === 'status-update' && e.status.state === 'completed',
@@ -89,11 +93,12 @@ describe('claudeExecutor', () => {
   });
 
   it('publishes failed status-update with final=true on error result', async () => {
+    const { bus, published } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['something broke'] },
     ));
 
-    await claudeExecutor.execute(makeContext('task'), eventBus);
+    await claudeExecutor.execute(makeContext('task'), bus);
 
     const failed = published.find(
       (e) => e.kind === 'status-update' && e.status.state === 'failed',
@@ -104,13 +109,14 @@ describe('claudeExecutor', () => {
   });
 
   it('publishes canceled status-update on AbortError', async () => {
+    const { bus, published } = makeEventBus();
     const { AbortError: MockAbortError } = mockedSdk;
     async function* throwAbort(): AsyncGenerator<never, void> {
       throw new MockAbortError();
     }
     mockedSdk.query.mockReturnValue(throwAbort());
 
-    await claudeExecutor.execute(makeContext('task'), eventBus);
+    await claudeExecutor.execute(makeContext('task'), bus);
 
     const canceled = published.find(
       (e) => e.kind === 'status-update' && e.status.state === 'canceled',
@@ -120,24 +126,124 @@ describe('claudeExecutor', () => {
   });
 
   it('calls eventBus.finished() after execution', async () => {
+    const { bus } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'result', subtype: 'success', is_error: false, result: '' },
     ));
-    const finishedSpy = jest.spyOn(eventBus, 'finished');
+    const finishedSpy = jest.spyOn(bus, 'finished');
 
-    await claudeExecutor.execute(makeContext('task'), eventBus);
+    await claudeExecutor.execute(makeContext('task'), bus);
 
     expect(finishedSpy).toHaveBeenCalledTimes(1);
   });
 
   it('cancelTask aborts the running query', async () => {
+    const { bus } = makeEventBus();
     mockedSdk.query.mockReturnValue(gen(
       { type: 'result', subtype: 'success', is_error: false, result: '' },
     ));
 
     const ctx = makeContext('task');
-    await claudeExecutor.execute(ctx, eventBus);
-    // cancelTask should not throw even when no controller is registered
-    await expect(claudeExecutor.cancelTask(ctx.taskId, eventBus)).resolves.toBeUndefined();
+    await claudeExecutor.execute(ctx, bus);
+    await expect(claudeExecutor.cancelTask(ctx.taskId, bus)).resolves.toBeUndefined();
+  });
+
+  describe('HITL — canUseTool', () => {
+    it('emits input-required (non-final) when canUseTool is called', async () => {
+      const { bus, published } = makeEventBus();
+      const contextId = uuidv4();
+
+      // Make query() call canUseTool then resolve
+      mockedSdk.query.mockImplementation(({ options }: any) => {
+        async function* run() {
+          if (options?.canUseTool) {
+            // Call it but don't await — we want to capture the pending state
+            void options.canUseTool('Bash', { cmd: 'rm -rf /' }, {
+              signal: new AbortController().signal,
+              toolUseID: 'tuid-1',
+            });
+          }
+          // Yield nothing further (simulate query blocked on permission)
+        }
+        return run();
+      });
+
+      // Start execute without awaiting — it will block on canUseTool
+      const execPromise = claudeExecutor.execute(makeContext('task', contextId), bus);
+
+      // Give the generator time to reach canUseTool and publish input-required
+      await new Promise((r) => setImmediate(r));
+
+      const inputRequired = published.find(
+        (e) => e.kind === 'status-update' && e.status.state === 'input-required',
+      );
+      expect(inputRequired).toBeDefined();
+      expect(inputRequired.final).toBe(false);
+
+      // Resolve by sending "no" so execute() can finish
+      const { bus: bus2 } = makeEventBus();
+      await claudeExecutor.execute(makeContext('no', contextId), bus2);
+      await execPromise;
+    });
+
+    it('resolves allow when user replies yes', async () => {
+      const { bus } = makeEventBus();
+      const { bus: bus2, published: published2 } = makeEventBus();
+      const contextId = uuidv4();
+      let capturedResult: any = null;
+
+      mockedSdk.query.mockImplementation(({ options }: any) => {
+        async function* run() {
+          if (options?.canUseTool) {
+            capturedResult = await options.canUseTool('Bash', {}, {
+              signal: new AbortController().signal,
+              toolUseID: 'tuid-2',
+            });
+          }
+          yield { type: 'result', subtype: 'success', is_error: false, result: '' };
+        }
+        return run();
+      });
+
+      const execPromise = claudeExecutor.execute(makeContext('task', contextId), bus);
+      await new Promise((r) => setImmediate(r));
+
+      await claudeExecutor.execute(makeContext('yes', contextId), bus2);
+      await execPromise;
+
+      expect(capturedResult?.behavior).toBe('allow');
+      const completed2 = published2.find(
+        (e) => e.kind === 'status-update' && e.status.state === 'completed',
+      );
+      expect(completed2?.final).toBe(true);
+    });
+
+    it('resolves deny when user replies no', async () => {
+      const { bus } = makeEventBus();
+      const { bus: bus2 } = makeEventBus();
+      const contextId = uuidv4();
+      let capturedResult: any = null;
+
+      mockedSdk.query.mockImplementation(({ options }: any) => {
+        async function* run() {
+          if (options?.canUseTool) {
+            capturedResult = await options.canUseTool('Bash', {}, {
+              signal: new AbortController().signal,
+              toolUseID: 'tuid-3',
+            });
+          }
+          yield { type: 'result', subtype: 'success', is_error: false, result: '' };
+        }
+        return run();
+      });
+
+      const execPromise = claudeExecutor.execute(makeContext('delete production.db', contextId), bus);
+      await new Promise((r) => setImmediate(r));
+
+      await claudeExecutor.execute(makeContext('no', contextId), bus2);
+      await execPromise;
+
+      expect(capturedResult?.behavior).toBe('deny');
+    });
   });
 });
