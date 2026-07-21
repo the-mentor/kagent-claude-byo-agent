@@ -9,7 +9,7 @@ spec:
   byo:
     deployment:
       image: <registry>/claude-byo-agent:latest
-      cmd: ["node", "dist/index.js"]
+      cmd: /docker-entrypoint.sh
       env:
         - name: ANTHROPIC_API_KEY
           valueFrom:

@@ -4,7 +4,7 @@ USER root
 WORKDIR /app
 
 # copy entrypoint script and make it executable
-COPY docker-entrypoint.sh /
+COPY --chmod=755 docker-entrypoint.sh /
 
 # Copy package files first for layer caching
 COPY package.json ./
