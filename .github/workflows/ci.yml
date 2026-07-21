@@ -2,16 +2,13 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches-ignore:
-      - main
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref }}
   cancel-in-progress: true
 
 jobs:
