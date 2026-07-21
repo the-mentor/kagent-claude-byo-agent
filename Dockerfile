@@ -18,7 +18,7 @@ RUN mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
 
 USER agent
 
-EXPOSE 8080
+EXPOSE 80
 
 # Override the base image's acp-shim ENTRYPOINT — ACP is not used
 ENTRYPOINT ["/docker-entrypoint.sh"]
