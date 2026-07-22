@@ -47,6 +47,44 @@ function saveSession(contextId: string, sessionId: string): void {
   }
 }
 
+// Durable fallback for canUseTool prompts: on a SandboxAgent, the gVisor container
+// that blocked in canUseTool is destroyed and restored clean before the human's
+// approve/deny click arrives as a new request — the in-memory pendingPermissions
+// Promise resolve() from that container is gone. We persist just enough
+// (toolName/toolInput) to recognize the decision and replay the tool call in a
+// fresh resumed session instead of trying to resolve a callback that no longer exists.
+const PENDING_PERMISSION_FILE = '/data/.pending-permission.json';
+
+function getPendingPermission(contextId: string): { toolName: string; toolInput: Record<string, unknown> } | undefined {
+  try {
+    const map = JSON.parse(fs.readFileSync(PENDING_PERMISSION_FILE, 'utf-8')) as Record<string, { toolName: string; toolInput: Record<string, unknown> }>;
+    return map[contextId];
+  } catch {
+    return undefined;
+  }
+}
+
+function savePendingPermission(contextId: string, toolName: string, toolInput: Record<string, unknown>): void {
+  try {
+    let map: Record<string, { toolName: string; toolInput: Record<string, unknown> }> = {};
+    try {
+      map = JSON.parse(fs.readFileSync(PENDING_PERMISSION_FILE, 'utf-8'));
+    } catch { /* file missing or corrupt — start fresh */ }
+    map[contextId] = { toolName, toolInput };
+    fs.writeFileSync(PENDING_PERMISSION_FILE, JSON.stringify(map), 'utf-8');
+  } catch (err) {
+    logger.warn({ contextId, err }, 'failed to persist pending permission');
+  }
+}
+
+function clearPendingPermission(contextId: string): void {
+  try {
+    const map = JSON.parse(fs.readFileSync(PENDING_PERMISSION_FILE, 'utf-8')) as Record<string, unknown>;
+    delete map[contextId];
+    fs.writeFileSync(PENDING_PERMISSION_FILE, JSON.stringify(map), 'utf-8');
+  } catch { /* nothing persisted to clear */ }
+}
+
 // Keyed by contextId — stores the resolve fn for a paused canUseTool prompt.
 const pendingPermissions = new Map<string, {
   resolve: (r: PermissionResult) => void;
@@ -168,6 +206,102 @@ function makeTaskEvent(taskId: string, contextId: string): Task {
   };
 }
 
+// Replays a canUseTool decision that arrived after the original blocked container
+// was destroyed (SandboxAgent checkpoint/restore). Resumes the Claude session and
+// nudges it to retry the pending action; the retry's first matching tool call is
+// auto-decided per `autoDecision` instead of prompting the human again. Any further
+// tool call in this turn falls back to normal HITL (persist + emit input-required).
+async function runResumedApprovalTurn(
+  taskId: string,
+  contextId: string,
+  eventBus: ExecutionEventBus,
+  prompt: string,
+  autoDecision: { decision: 'allow' | 'deny'; toolName: string },
+): Promise<void> {
+  const abortController = new AbortController();
+  abortControllers.set(taskId, abortController);
+  const existingSession = getSession(contextId);
+  let responseText = '';
+  let autoDecisionUsed = false;
+
+  const canUseTool: CanUseTool = (toolName, input, opts) => {
+    const toolInput = (input ?? {}) as Record<string, unknown>;
+    if (!autoDecisionUsed && toolName === autoDecision.toolName) {
+      autoDecisionUsed = true;
+      if (autoDecision.decision === 'allow') {
+        return Promise.resolve({
+          behavior: 'allow',
+          toolUseID: opts.toolUseID,
+          updatedInput: toolInput,
+        } as PermissionResult);
+      }
+      return Promise.resolve({
+        behavior: 'deny',
+        message: 'User denied the tool use.',
+        toolUseID: opts.toolUseID,
+      } as PermissionResult);
+    }
+    savePendingPermission(contextId, toolName, toolInput);
+    eventBus.publish(makeInputRequiredEvent(taskId, contextId, toolName, toolInput, opts.toolUseID));
+    return new Promise<PermissionResult>((resolve) => {
+      pendingPermissions.set(contextId, { resolve, toolUseID: opts.toolUseID, toolName, toolInput });
+      abortController.signal.addEventListener(
+        'abort',
+        () => {
+          pendingPermissions.delete(contextId);
+          clearPendingPermission(contextId);
+          resolve({ behavior: 'deny', message: 'Task aborted', toolUseID: opts.toolUseID });
+        },
+        { once: true },
+      );
+    });
+  };
+
+  try {
+    for await (const msg of query({
+      prompt,
+      options: {
+        cwd: WORKSPACE,
+        abortController,
+        canUseTool,
+        allowedTools: ['Read', 'Glob', 'Grep', 'LS'],
+        ...(existingSession ? { resume: existingSession } : {}),
+      },
+    })) {
+      logger.debug({ type: msg.type, subtype: 'subtype' in msg ? msg.subtype : undefined }, 'sdk msg (resumed approval)');
+      if (msg.type === 'system' && msg.subtype === 'init') {
+        saveSession(contextId, msg.session_id);
+      } else if (msg.type === 'assistant') {
+        for (const block of msg.message.content) {
+          if (block.type === 'text') {
+            responseText += block.text;
+            eventBus.publish(makeStatusEvent(taskId, contextId, 'working', false, block.text, true));
+          } else if (block.type === 'tool_use') {
+            eventBus.publish(makeStatusEvent(taskId, contextId, 'working', false, `Using tool: ${block.name}`, true));
+          }
+        }
+      } else if (msg.type === 'result') {
+        if (msg.subtype === 'success' && !msg.is_error) {
+          eventBus.publish(makeStatusEvent(taskId, contextId, 'completed', true, responseText || undefined));
+        } else {
+          const errText = 'errors' in msg ? (msg.errors as string[]).join('; ') : msg.subtype;
+          eventBus.publish(makeStatusEvent(taskId, contextId, 'failed', true, errText));
+        }
+      }
+    }
+  } catch (err: unknown) {
+    if (err instanceof AbortError) {
+      eventBus.publish(makeStatusEvent(taskId, contextId, 'canceled', true));
+    } else {
+      eventBus.publish(makeStatusEvent(taskId, contextId, 'failed', true, String(err)));
+    }
+  } finally {
+    pendingPermissions.delete(contextId);
+    abortControllers.delete(taskId);
+    eventBus.finished();
+  }
+}
+
 export const claudeExecutor: AgentExecutor = {
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     const { taskId, contextId, userMessage } = requestContext;
@@ -177,6 +311,7 @@ export const claudeExecutor: AgentExecutor = {
     const pending = pendingPermissions.get(contextId);
     if (pending) {
       pendingPermissions.delete(contextId);
+      clearPendingPermission(contextId);
       if (parseDecision(userMessage) === 'allow') {
         pending.resolve({
           behavior: 'allow',
@@ -215,6 +350,29 @@ export const claudeExecutor: AgentExecutor = {
       return;
     }
 
+    // No live in-memory Promise for this contextId. On a SandboxAgent the container
+    // that blocked in canUseTool was destroyed and restored clean before this
+    // approve/deny click arrived as a brand new request — check the durable record
+    // written just before that happened. There's no original execute() to hand this
+    // eventBus to, so replay the tool call ourselves in a fresh resumed session and
+    // prime canUseTool to auto-decide the retry instead of prompting again.
+    const persistedPending = getPendingPermission(contextId);
+    if (persistedPending) {
+      clearPendingPermission(contextId);
+      const decision = parseDecision(userMessage);
+      if (!requestContext.task) {
+        eventBus.publish(makeTaskEvent(taskId, contextId));
+      }
+      await runResumedApprovalTurn(
+        taskId,
+        contextId,
+        eventBus,
+        decision === 'allow' ? 'Yes, please proceed with that.' : 'No, please do not do that.',
+        { decision, toolName: persistedPending.toolName },
+      );
+      return;
+    }
+
     // Publish a Task event first so ResultManager.currentTask is initialized before
     // any status-update or artifact-update events arrive. Without this, message/send
     // drops all updates ("unknown task") because the task is never in the store.
@@ -242,6 +400,7 @@ export const claudeExecutor: AgentExecutor = {
     // canUseTool pauses query() and emits input-required so the human can decide.
     const canUseTool: CanUseTool = (toolName, input, opts) => {
       const toolInput = (input ?? {}) as Record<string, unknown>;
+      savePendingPermission(contextId, toolName, toolInput);
       eventBus.publish(
         makeInputRequiredEvent(taskId, contextId, toolName, toolInput, opts.toolUseID),
       );
@@ -257,6 +416,7 @@ export const claudeExecutor: AgentExecutor = {
           'abort',
           () => {
             pendingPermissions.delete(contextId);
+            clearPendingPermission(contextId);
             resolve({ behavior: 'deny', message: 'Task aborted', toolUseID: opts.toolUseID });
           },
           { once: true },
