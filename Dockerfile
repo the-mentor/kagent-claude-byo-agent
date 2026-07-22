@@ -4,15 +4,16 @@ USER root
 WORKDIR /app
 
 # copy entrypoint script and make it executable
-COPY --chmod=755 docker-entrypoint.sh /
+COPY --chmod=755 docker-entrypoint.sh /docker-entrypoint.sh
 
-# Copy package files first for layer caching
-COPY package.json ./
-COPY tsconfig.json ./
-COPY src/ src/
+# Install deps in a separate layer — only invalidated when package.json changes
+COPY package.json /app/package.json
+RUN --mount=type=cache,target=/root/.npm npm install
 
-# Install all deps (including devDeps needed for tsc + jest), build, test, then prune
-RUN npm install && npm run build && npm test && npm prune --omit=dev
+# Build and test — invalidated when src/ or tsconfig.json changes
+COPY tsconfig.json /app/tsconfig.json
+COPY src/ /app/src/
+RUN npm run build && npm test && npm prune --omit=dev
 
 RUN mkdir -p /data && chown -R agent:agent /data
 
