@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/the-mentor/kagent-claude-byo-agent/compare/v1.0.2...v1.0.3) (2026-07-22)
+
+
+### Bug Fixes
+
+* persist HITL pending permissions so SandboxAgent approvals survive checkpoint/restore ([#13](https://github.com/the-mentor/kagent-claude-byo-agent/issues/13)) ([2ae8498](https://github.com/the-mentor/kagent-claude-byo-agent/commit/2ae849848f9c1f8220b3be237c9a08a85b5ad1c7))
+
 ## [1.0.2](https://github.com/the-mentor/kagent-claude-byo-agent/compare/v1.0.1...v1.0.2) (2026-07-21)
 
 
